@@ -1644,14 +1644,41 @@ footer p {
  const demo=document.getElementById('rsvpDemoGuest');
  let busy=false;
 
- // JSONP is used because Apps Script ContentService responses can be cross-origin.
- function callAppsScript(action, params={}) {
+ // Try a normal HTTPS request first; if the browser blocks cross-origin fetch,
+ // fall back to JSONP. The Apps Script deployment must be accessible to Anyone.
+ async function callAppsScript(action, params={}) {
+   const query = new URLSearchParams({action, ...params, _ts:String(Date.now())});
+   const url = APPS_SCRIPT_URL + '?' + query.toString();
+
+   // First try a direct JSON request. Some Apps Script deployments permit CORS.
+   try {
+     const controller = new AbortController();
+     const timeout = setTimeout(() => controller.abort(), 12000);
+     try {
+       const response = await fetch(url, {
+         method: 'GET',
+         mode: 'cors',
+         cache: 'no-store',
+         redirect: 'follow',
+         signal: controller.signal
+       });
+       if (response.ok) {
+         const data = await response.json();
+         if (data && typeof data === 'object') return data;
+       }
+     } finally {
+       clearTimeout(timeout);
+     }
+   } catch (_) {
+     // Cross-origin fetch can be blocked by Apps Script; try JSONP below.
+   }
+
+   // JSONP fallback for Apps Script ContentService deployments without CORS.
    return new Promise((resolve,reject)=>{
      const callbackName='jlRsvpCallback_'+Date.now()+'_'+Math.floor(Math.random()*100000);
-     const query=new URLSearchParams({action,...params,callback:callbackName,_ts:String(Date.now())});
+     const jsonpQuery=new URLSearchParams({action,...params,callback:callbackName,_ts:String(Date.now())});
      const script=document.createElement('script');
      let finished=false;
-     let callbackReceived=false;
      const cleanup=()=>{
        finished=true;
        try { delete window[callbackName]; } catch (_) { window[callbackName]=undefined; }
@@ -1661,37 +1688,34 @@ footer p {
      const timer=setTimeout(()=>{
        if(!finished){
          cleanup();
-         reject(new Error('Timed out waiting for the RSVP response. Please check that the latest Apps Script version is deployed and supports JSONP callbacks.'));
+         reject(new Error('Hindi makakonekta sa RSVP verification. Tiyaking naka-deploy ang pinakabagong Apps Script version at ang access ay “Anyone”.'));
        }
      },20000);
      window[callbackName]=(data)=>{
        if(finished)return;
-       callbackReceived=true;
        cleanup();
        if(!data || typeof data !== 'object') {
-         reject(new Error('The RSVP server returned an invalid response.'));
+         reject(new Error('Invalid ang response ng RSVP server.'));
          return;
        }
        resolve(data);
      };
      script.async=true;
-     // Do not force a no-referrer policy for the Apps Script request.
-     // Google Apps Script may redirect the /exec URL before serving the JSONP response.
      script.onerror=()=>{
        if(!finished){
          cleanup();
-         reject(new Error('The browser could not load the RSVP verification script. Please test the website in Chrome using its published website URL (not a local file preview), then try again. If it still fails, check browser extensions or network filtering for script.google.com.'));
+         reject(new Error('Hindi ma-load ang Google Apps Script. Sa Apps Script, i-deploy muli bilang Web app, piliin ang Execute as: Me at Who has access: Anyone, pagkatapos i-update ang deployment.'));
        }
      };
      script.onload=()=>{
-       // A script can load successfully without invoking the expected JSONP callback
-       // if an older deployment returns plain JSON instead of callback(...).
-       if(!finished && !callbackReceived){
+       // If the script loaded but did not invoke the JSONP callback, the
+       // deployed Apps Script version likely does not support callback output.
+       if(!finished){
          cleanup();
-         reject(new Error('The RSVP endpoint loaded but did not return JSONP. Redeploy the latest Apps Script code as a new version.'));
+         reject(new Error('Na-load ang RSVP endpoint pero walang JSONP response. I-update at i-deploy muli ang Apps Script code.'));
        }
      };
-     script.src=APPS_SCRIPT_URL+'?'+query.toString();
+     script.src=APPS_SCRIPT_URL+'?'+jsonpQuery.toString();
      document.body.appendChild(script);
    });
  }
